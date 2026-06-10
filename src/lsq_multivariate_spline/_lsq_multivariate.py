@@ -8,6 +8,7 @@ coordinates.
 
 from __future__ import annotations
 
+import itertools
 from dataclasses import dataclass
 from operator import index
 
@@ -97,14 +98,7 @@ class LSQMultivariateSpline:
 
         x, was_scalar = _validate_eval_input(x, ndim=self._input.x.shape[1])
 
-        if x.shape[1] != 1:
-            raise NotImplementedError("Only 1D evaluation is implemented yet.")
-
-        s_matrix = _design_matrix_1d(
-            x[:, 0],
-            self._basis[0],
-            self._input.k[0],
-        )
+        s_matrix = _design_matrix(x, self._basis, self._input.k)
         values = s_matrix @ self._coeffs
 
         if was_scalar:
@@ -126,19 +120,12 @@ class LSQMultivariateSpline:
 
     def _fit(self):
         """Fit the spline coefficients from the constructor inputs."""
-        if self._input.x.shape[1] != 1:
-            raise NotImplementedError("Only 1D fitting is implemented yet.")
-
         full_knots = _construct_full_knots(
             self._input.t,
             self._input.bbox,
             self._input.k,
         )
-        s_matrix = _design_matrix_1d(
-            self._input.x[:, 0],
-            full_knots[0],
-            self._input.k[0],
-        )
+        s_matrix = _design_matrix(self._input.x, full_knots, self._input.k)
         coeffs, residual = _solve_lsq(
             s_matrix,
             self._input.y,
@@ -410,13 +397,65 @@ def _bspline_basis_1d(x, knots, degree, basis_index):
     return values
 
 
-def _design_matrix_1d(x, knots, degree):
-    """Build S where S[i, j] = B_j(x_i)."""
+def _design_matrix_axis(x, knots, degree):
+    """Build the 1D basis matrix for one input axis.
+
+    Returns
+    -------
+    matrix : ndarray, shape (n_samples, n_basis_axis)
+        matrix[i, j] = B_j(x_i)
+    """
     n_basis = len(knots) - degree - 1
     columns = [
         _bspline_basis_1d(x, knots, degree, basis_index)
         for basis_index in range(n_basis)
     ]
+    return np.column_stack(columns)
+
+
+def _design_matrix(x, knots, degrees):
+    """Build the tensor-product design matrix for all dimensions.
+
+    Parameters
+    ----------
+    x : ndarray, shape (n_samples, n_dimensions)
+        Sample coordinates.
+    knots : tuple of ndarray
+        Full knot vector for each dimension.
+    degrees : tuple of int
+        Spline degree for each dimension.
+
+    Returns
+    -------
+    matrix : ndarray, shape (n_samples, n_total_basis)
+        Design matrix where each column is one tensor-product basis function.
+    """
+    x = np.asarray(x, dtype=float)
+    n_samples, ndim = x.shape
+
+    axis_matrices = [
+        _design_matrix_axis(
+            x[:, axis],
+            knots[axis],
+            degrees[axis],
+        )
+        for axis in range(ndim)
+    ]
+
+    basis_counts = [matrix.shape[1] for matrix in axis_matrices]
+    basis_index_combinations = itertools.product(
+        *[range(count) for count in basis_counts]
+    )
+
+    columns = []
+    for basis_indices in basis_index_combinations:
+        column = np.ones(n_samples, dtype=float)
+
+        for axis, basis_index in enumerate(basis_indices):
+            column *= axis_matrices[axis][:, basis_index]
+
+        columns.append(column)
+
     return np.column_stack(columns)
 
 
